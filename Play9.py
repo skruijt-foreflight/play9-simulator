@@ -7,13 +7,13 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import QThread, pyqtSignal
 
 RANKS = [-5, -3, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
-N_PLAYERS = 6
-N_SIMULATIONS = 100000
+N_PLAYERS = 5
 
 class SimulationConfig:
-    def __init__(self, target_score=6, num_rounds=7):
+    def __init__(self, target_score=6, num_rounds=7, num_simulations=100000):
         self.target_score = target_score
         self.num_rounds = num_rounds
+        self.num_simulations = num_simulations
 
 class SimulationWorker(QThread):
     progress = pyqtSignal(int)
@@ -47,57 +47,54 @@ class SimulationWorker(QThread):
         deck = [rank for rank in RANKS for _ in range(4)]
         random.shuffle(deck)
 
-        hands = [[] for _ in range(N_PLAYERS)]
+        # Deal initial hands
+        hand = []
         for _ in range(8):
-            for player in range(N_PLAYERS):
-                hands[player].append(deck.pop())
+            hand.append(deck.pop())
 
-        draw_pile = deck
-        cards_face_up = [0] * N_PLAYERS
-        game_ongoing = True
+        # Simulate imperfect play by occasionally making suboptimal choices
+        if random.random() < 0.3:  # 30% chance of suboptimal play
+            return self.play_turn(hand)
 
-        while game_ongoing:
-            for player in range(N_PLAYERS):
-                if cards_face_up[player] < 8 and draw_pile:
-                    drawn_card = draw_pile.pop()
-                    if player == 0:
-                        best_pos = self.calculate_best_move(hands[0], drawn_card)
-                        if best_pos != -1:
-                            hands[0][best_pos] = drawn_card
-                    cards_face_up[player] += 1
+        # Try to optimize the hand
+        for _ in range(3):  # Limited optimization attempts
+            if deck:
+                drawn_card = deck.pop()
+                best_pos = self.calculate_best_move(hand, drawn_card)
+                if best_pos != -1:
+                    hand[best_pos] = drawn_card
 
-            if max(cards_face_up) == 8 or not draw_pile:
-                game_ongoing = False
-
-        return self.play_turn(hands[0])
+        return self.play_turn(hand)
 
     def run(self):
         total_matches = 0
         round_stats = []
 
-        for sim in range(N_SIMULATIONS):
-            if sim % (N_SIMULATIONS // 100) == 0:
-                self.progress.emit(int(sim / N_SIMULATIONS * 100))
+        for sim in range(self.config.num_simulations):
+            if sim % (self.config.num_simulations // 100) == 0:
+                self.progress.emit(int(sim / self.config.num_simulations * 100))
 
             scores = []
             total_score = 0
             for _ in range(self.config.num_rounds):
                 game_score = self.play_game()
                 scores.append(game_score)
-                total_score += game_score
+                total_score += game_score  # Sum of all rounds
 
-            if total_score == self.config.target_score:
+            # Compare the total score, not the average
+            if total_score <= self.config.target_score:
                 round_stats.append(scores)
                 total_matches += 1
-                self.log.emit(f"Match found! Round scores: {scores}")
+                self.log.emit(f"Match found! Round scores: {scores}, Total: {total_score}")
 
-        probability = total_matches/N_SIMULATIONS
+        probability = total_matches/self.config.num_simulations
         results = {
             'total_matches': total_matches,
             'probability': probability,
             'round_stats': round_stats[:5],
             'target_score': self.config.target_score,
-            'num_rounds': self.config.num_rounds
+            'num_rounds': self.config.num_rounds,
+            'num_simulations': self.config.num_simulations
         }
         self.progress.emit(100)
         self.finished.emit(results)
@@ -164,19 +161,32 @@ class MainWindow(QMainWindow):
         self.start_button.clicked.connect(self.start_simulation)
         layout.addWidget(self.start_button)
 
+        # Number of simulations configuration
+        simulations_layout = QVBoxLayout()
+        simulations_label = QLabel("Number of Simulations:")
+        self.simulations_spin = QSpinBox()
+        self.simulations_spin.setRange(1000, 1000000)
+        self.simulations_spin.setValue(1000)
+        self.simulations_spin.setSingleStep(1000)
+        simulations_layout.addWidget(simulations_label)
+        simulations_layout.addWidget(self.simulations_spin)
+        config_layout.addLayout(simulations_layout)
+
         self.worker = None
 
     def start_simulation(self):
         self.start_button.setEnabled(False)
         self.target_score_spin.setEnabled(False)
         self.rounds_spin.setEnabled(False)
+        self.simulations_spin.setEnabled(False)
         self.results.clear()
         self.status.setText("Simulation running...")
         self.progress.setValue(0)
 
         config = SimulationConfig(
             target_score=self.target_score_spin.value(),
-            num_rounds=self.rounds_spin.value()
+            num_rounds=self.rounds_spin.value(),
+            num_simulations=self.simulations_spin.value()
         )
 
         self.worker = SimulationWorker(config)
@@ -196,16 +206,21 @@ class MainWindow(QMainWindow):
         self.start_button.setEnabled(True)
         self.target_score_spin.setEnabled(True)
         self.rounds_spin.setEnabled(True)
+        self.simulations_spin.setEnabled(True)
 
         output = "Simulation Results\n"
         output += "================\n"
-        output += f"Target Score: {results['target_score']}\n"
+        output += f"Maximum Score: {results['target_score']}\n"
         output += f"Number of Rounds: {results['num_rounds']}\n"
-        output += f"Total matches: {results['total_matches']}\n"
+        output += f"Number of Simulations: {results['num_simulations']}\n"
+        output += f"Total matches (scores ≤ {results['target_score']}): {results['total_matches']}\n"
         probability = results['probability']
         output += f"Probability: {probability:.6f} ({probability*100:.4f}%)\n"
-        output += f"Approximately 1 in {round(1/probability)} full games\n\n"
 
+        if probability > 0:
+            output += f"Approximately 1 in {round(1/probability)} full games\n\n"
+        else:
+            output += "No matches found in the simulation\n\n"
         if results['round_stats']:
             output += "Example patterns found:\n"
             for i, pattern in enumerate(results['round_stats'], 1):
